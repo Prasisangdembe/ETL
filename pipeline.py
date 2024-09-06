@@ -2,12 +2,13 @@ from bs4 import BeautifulSoup as bs
 import requests
 import pandas as pd
 from pyspark.sql import SparkSession
-from pyspark.sql.types import StructType, StructField, StringType, IntegerType, DoubleType
-from pyspark.sql.functions import regexp_replace, col
+from pyspark.sql.types import StructType, StructField, StringType, IntegerType, FloatType, DateType
+from pyspark.sql.functions import regexp_replace, col, to_date
 import psycopg2
 
-url = 'https://catalog.data.gov/dataset/border-crossing-entry-data-683ae/resource/46b04e29-f1fe-406b-8488-774367f9a549'
-data_format = "csv"
+# URL of the CSV file
+url = 'https://catalog.data.gov/dataset/real-estate-sales-2001-2018/resource/f7cb94d8-283c-476f-a966-cc8c9e1308b4'
+schema_name = 'public'  # Define your schema name here
 
 # Scraping CSV file from website
 def get_soup(url):
@@ -22,8 +23,20 @@ def get_unique_csv_links(url, data_format="csv"):
     return unique_links
 
 def load_csv_to_pandas(csv_url):
-    # Load CSV into Pandas DataFrame
-    df = pd.read_csv(csv_url,header=50)
+    columns = [
+        'Serial Number',
+        'List Year',
+        'Date Recorded',
+        'Town',
+        'Address',
+        'Assessed Value',
+        'Sale Amount',
+        'Sales Ratio',
+        'Property Type',
+        'Residential Type',
+        'Location'
+    ]
+    df = pd.read_csv(csv_url, usecols=columns)
     return df
 
 def load_csv_to_spark(pandas_df):
@@ -32,92 +45,107 @@ def load_csv_to_spark(pandas_df):
         .config("spark.executor.memory", "4g") \
         .config("spark.driver.memory", "2g") \
         .getOrCreate()
-    
+
     schema = StructType([
-        StructField('Port Name', StringType(), True),
-        StructField('State', StringType(), True),
-        StructField('Port Code', IntegerType(), True),
-        StructField('Border', StringType(), True),
-        StructField('Date', StringType(), True),
-        StructField('Measure', StringType(), True),
-        StructField('Value', IntegerType(), True),
-        StructField('Latitude', DoubleType(), True),
-        StructField('Longitude', DoubleType(), True),
-        StructField('Point', StringType(), True)
+        StructField('Serial Number', IntegerType(), True),
+        StructField('List Year', IntegerType(), True),
+        StructField('Date Recorded', StringType(), True),
+        StructField('Town', StringType(), True),
+        StructField('Address', StringType(), True),
+        StructField('Assessed Value', FloatType(), True),
+        StructField('Sale Amount', FloatType(), True),
+        StructField('Sales Ratio', FloatType(), True),
+        StructField('Property Type', StringType(), True),
+        StructField('Residential Type', StringType(), True),
+        StructField('Location', StringType(), True)
     ])
 
-    # Create Spark DataFrame from Pandas DataFrame
     spark_df = spark.createDataFrame(pandas_df, schema=schema)
-    spark_df = spark_df.repartition(100) 
-    return spark_df
 
-# Data Cleaning
+    renamed_df = spark_df \
+        .withColumnRenamed('Serial Number', 'SN') \
+        .withColumnRenamed('List Year', 'list_year') \
+        .withColumnRenamed('Date Recorded', 'date_recorded') \
+        .withColumnRenamed('Town', 'town') \
+        .withColumnRenamed('Address', 'address') \
+        .withColumnRenamed('Assessed Value', 'assessed_value') \
+        .withColumnRenamed('Sale Amount', 'sale_amount') \
+        .withColumnRenamed('Sales Ratio', 'sales_ratio') \
+        .withColumnRenamed('Property Type', 'property_type') \
+        .withColumnRenamed('Residential Type', 'residential_type') \
+        .withColumnRenamed('Location', 'location')
+
+    renamed_df = renamed_df.repartition(100)
+    return renamed_df
+
 def clean_data(spark_df):
-    # Replace null values with empty strings
     spark_df = spark_df.fillna('')
-    # numeric columns do not contain alphabets
-    spark_df = spark_df.withColumn("Value", regexp_replace(col("Value"), '[^0-9]', '').cast(IntegerType()))
+    spark_df = spark_df.withColumn("sales_ratio", regexp_replace(col("sales_ratio"), '[^\d.]', '').cast(FloatType())).filter(col("sales_ratio") >= 0)
+    spark_df = spark_df.withColumn("sale_amount", regexp_replace(col("sale_amount"), '[^\d.]', '').cast(FloatType())).filter(col("sale_amount") >= 0)
+    spark_df = spark_df.withColumn("date_recorded", to_date(col("date_recorded"), "MM/dd/yyyy"))
+    spark_df = spark_df.withColumn("list_year", col("list_year").cast(IntegerType()))
+    spark_df = spark_df.dropDuplicates(["SN"])
     return spark_df
 
-def load_to_mysql(spark_df):
-    #connection setup
+def create_table_if_not_exists(connection, cursor):
     try:
-        connection = psycopg2.connect(
-            host="172.31.17.197",
-            user="prasis_angdembe",
-            password="",
-            database="",
-            port=5678
-        )
-        print("Database connection successful!")
-    except Exception as e:
-        print(f"Failed to connect to database: {e}")
-        return
-
-    cursor = connection.cursor()
-
-    # Creating table
-    try:
-        cursor.execute('''
-            CREATE TABLE IF NOT EXISTS public.border_crossing_data (
-                port_name VARCHAR(255),
-                state VARCHAR(255),
-                port_code VARCHAR(255),
-                border VARCHAR(255),
-                date VARCHAR(255),
-                measure VARCHAR(255),
-                value VARCHAR(255),
-                latitude VARCHAR(255),
-                longitude VARCHAR(255),
-                point VARCHAR(255)
+        cursor.execute(f'''
+            CREATE TABLE IF NOT EXISTS {schema_name}.border_crossing_data (
+                SN VARCHAR(255),
+                list_year INTEGER,
+                date_recorded DATE,
+                town VARCHAR(255),
+                address VARCHAR(255),
+                assessed_value FLOAT,
+                sale_amount FLOAT,
+                sales_ratio FLOAT,
+                property_type VARCHAR(255),
+                residential_type VARCHAR(255),
+                location VARCHAR(255)
             )
         ''')
         print("Table created or already exists!")
     except Exception as e:
         print(f"Table creation failed: {e}")
-        return
 
-    # Insert data into the table row-by-row
+def write_to_postgres(spark_df, connection, cursor):
+    insert_query = f'''
+        INSERT INTO {schema_name}.border_crossing_data (
+            SN, list_year, date_recorded, town, address, assessed_value, sale_amount, sales_ratio, property_type, residential_type, location
+        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+    '''
+
     try:
         for row in spark_df.collect():
-            cursor.execute('''
-                INSERT INTO public.border_crossing_data (port_name, state, port_code, border, date, measure, value, latitude, longitude, point)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)''', 
-                (row['Port Name'], row['State'], row['Port Code'], row['Border'], row['Date'],
-                row['Measure'], row['Value'], row['Latitude'], row['Longitude'], row['Point'])
-                )
+            cursor.execute(insert_query, (
+                row['SN'], row['list_year'], row['date_recorded'], row['town'], row['address'],
+                row['assessed_value'], row['sale_amount'], row['sales_ratio'], row['property_type'],
+                row['residential_type'], row['location']
+            ))
         connection.commit()
         print("Data inserted successfully")
     except Exception as e:
         print(f"Data insertion failed: {e}")
-    finally:
-        cursor.close()
-        connection.close()
 
 def main():
+    # Create database connection
+    try:
+        connection = psycopg2.connect(
+            host="192.168.0.2",
+            user="prasis_angdembe",
+            password="xyz",
+            database="hello",
+            port=5678
+        )
+        cursor = connection.cursor()
+        print("Database connection successful!")
+    except Exception as e:
+        print(f"Failed to connect to database: {e}")
+        return
+
+    # Scrape and process CSV
     unique_links = get_unique_csv_links(url)
-    # Print the unique CSV links
-    print("Unique CSV links found on the page")
+    print("Unique CSV links found on the page:")
     for link in unique_links:
         print(link)
     
@@ -127,15 +155,23 @@ def main():
     # Load csv into pandas df
     pandas_df = load_csv_to_pandas(csv_url)
 
-    #load pd df into spark df
+    # Load pandas df into Spark df
     spark_df = load_csv_to_spark(pandas_df)
-    #for data cleaning
+
+    # Clean data
     spark_df = clean_data(spark_df)
     print("Cleaned Spark DataFrame:")
     spark_df.show()
 
-    #loading data into database
-    load_to_mysql(spark_df)
+    # Create table if it does not exist
+    create_table_if_not_exists(connection, cursor)
+
+    # Write data to PostgreSQL
+    write_to_postgres(spark_df, connection, cursor)
+
+    # Close connection
+    cursor.close()
+    connection.close()
 
 if __name__ == "__main__":
     main()
