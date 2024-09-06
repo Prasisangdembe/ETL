@@ -38,12 +38,12 @@ def load_csv_to_spark(pandas_df):
         StructField('State', StringType(), True),
         StructField('Port Code', IntegerType(), True),
         StructField('Border', StringType(), True),
-        StructField('Date', StringType(), True),  # Use TimestampType if time information is also present
+        StructField('Date', StringType(), True),
         StructField('Measure', StringType(), True),
         StructField('Value', IntegerType(), True),
         StructField('Latitude', DoubleType(), True),
         StructField('Longitude', DoubleType(), True),
-        StructField('Point', StringType(), True)  # Adjust based on the actual structure of 'Point'
+        StructField('Point', StringType(), True)
     ])
 
     # Create Spark DataFrame from Pandas DataFrame
@@ -55,7 +55,7 @@ def load_csv_to_spark(pandas_df):
 def clean_data(spark_df):
     # Replace null values with empty strings
     spark_df = spark_df.fillna('')
-    # Ensure numeric columns do not contain alphabets (clean any dirty data in 'Value' column)
+    # numeric columns do not contain alphabets
     spark_df = spark_df.withColumn("Value", regexp_replace(col("Value"), '[^0-9]', '').cast(IntegerType()))
     return spark_df
 
@@ -63,11 +63,11 @@ def load_to_mysql(spark_df):
     #connection setup
     try:
         connection = psycopg2.connect(
-            host="172.31.17.197",        # Host address
-            user="prasis_angdembe",      # Username
-            password="",           # Password
-            database="", # Database (this is your schema)
-            port=5678                    # Port (make sure this is correct; default is usually 3306)
+            host="172.31.17.197",
+            user="prasis_angdembe",
+            password="",
+            database="",
+            port=5678
         )
         print("Database connection successful!")
     except Exception as e:
